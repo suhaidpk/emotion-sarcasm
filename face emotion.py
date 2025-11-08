@@ -2,16 +2,7 @@ import cv2
 from deepface import DeepFace
 import pyttsx3
 import time
-
-# Initialize Text-to-Speech engine
-engine = pyttsx3.init()
-engine.setProperty('rate', 165)
-engine.setProperty('volume', 1.0)
-
-# 🗣️ Voice gender/mood selection
-voices = engine.getProperty('voices')
-# 0 = male (usually), 1 = female (depends on OS)
-engine.setProperty('voice', voices[1].id)  # change 1 → 0 for male voice
+import threading
 
 # Proverbs or relief quotes for each emotion
 emotion_quotes = {
@@ -24,14 +15,38 @@ emotion_quotes = {
     'surprise': "Life is full of surprises. Smile and welcome them."
 }
 
+# Store the last time we spoke each emotion
+last_spoken_time = {}
+COOLDOWN = 10  # seconds between repeats
+
+# Thread-safe speech function
+def speak_quote(quote):
+    """Run TTS safely in background without blocking or overlap."""
+    def _speak():
+        try:
+            # Create a fresh engine each time to avoid 'run loop already started'
+            engine = pyttsx3.init()
+            engine.setProperty('rate', 165)
+            engine.setProperty('volume', 1.0)
+            voices = engine.getProperty('voices')
+            engine.setProperty('voice', voices[1].id)  # 1=female, 0=male
+            engine.say(quote)
+            engine.runAndWait()
+            engine.stop()
+        except Exception as e:
+            print("Speech error:", e)
+
+    # Start background thread
+    threading.Thread(target=_speak, daemon=True).start()
+
+
 # Initialize webcam
 cap = cv2.VideoCapture(0)
 print("Starting camera... Press 'q' to quit.")
 
-# Emotion tracking variables
+# Emotion tracking
 last_emotion = None
 emotion_start_time = 0
-spoke_quote = False
 subtitle_text = ""
 subtitle_start_time = 0
 
@@ -41,7 +56,6 @@ while True:
         break
 
     try:
-        # Analyze emotions in real-time
         result = DeepFace.analyze(frame, actions=['emotion'], enforce_detection=False)
         dominant_emotion = result[0]['dominant_emotion'].lower()
         emotions = result[0]['emotion']
@@ -62,23 +76,21 @@ while True:
         if dominant_emotion != last_emotion:
             last_emotion = dominant_emotion
             emotion_start_time = current_time
-            spoke_quote = False  # reset
         else:
-            # Emotion stayed same for 5 seconds
-            if (current_time - emotion_start_time >= 5):
+            # If stable for 5s and not on cooldown
+            if current_time - emotion_start_time >= 5:
                 quote = emotion_quotes.get(dominant_emotion, "")
-                if quote:
-                    if not spoke_quote:
-                        print(f"🧠 Emotion stable ({dominant_emotion}). Saying: {quote}")
-                        engine.say(quote)
-                        engine.runAndWait()
-                        subtitle_text = quote
-                        subtitle_start_time = current_time
-                        spoke_quote = True
-                    else:
-                        # Only print after the first time
-                        print(f"🙂 Still {dominant_emotion}: {quote}")
-                emotion_start_time = current_time  # reset timer for next 5s cycle
+                last_time = last_spoken_time.get(dominant_emotion, 0)
+
+                # ✅ Speak only if not spoken in last COOLDOWN seconds
+                if quote and (current_time - last_time >= COOLDOWN):
+                    print(f"🧠 Emotion stable ({dominant_emotion}). Saying: {quote}")
+                    speak_quote(quote)
+                    subtitle_text = quote
+                    subtitle_start_time = current_time
+                    last_spoken_time[dominant_emotion] = current_time
+
+                emotion_start_time = current_time  # reset stability timer
 
         # Show subtitle for 5 seconds
         if subtitle_text and (time.time() - subtitle_start_time < 5):
